@@ -1,0 +1,179 @@
+name: Virttest Integration
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to test (all runs sequentially)"
+        required: true
+        type: choice
+        options:
+          - all
+          - pve
+          - incus
+          - docker
+          - lxd
+          - containerd
+          - podman
+          - qemu
+          - kubevirt
+        default: all
+      report_branch:
+        description: "Branch to publish reports"
+        required: false
+        type: string
+        default: test-reports
+      timeout_minutes:
+        description: "Per environment timeout (minutes)"
+        required: false
+        type: string
+        default: "210"
+
+jobs:
+  integration:
+    name: "Test: ${{ matrix.environment }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ fromJSON(inputs.timeout_minutes) }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        environment: ${{ inputs.environment == 'all' && fromJSON('["pve","incus","docker","lxd","containerd","podman","qemu","kubevirt"]') || fromJSON(format('["{0}"]', inputs.environment)) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq curl openssh-client sshpass
+
+      - name: Validate scripts
+        run: |
+          set -euo pipefail
+          errs=0
+          while IFS= read -r f; do
+            if ! bash -n "$f"; then
+              echo "::error::bash syntax error in $f"
+              errs=$((errs + 1))
+            fi
+          done < <(find action_tests -type f -name "*.sh" | sort)
+          if [[ $errs -gt 0 ]]; then
+            exit 1
+          fi
+
+      - name: Run environment test
+        id: run
+        env:
+          LIGHTNODE_TOKEN: ${{ secrets.LIGHTNODE_TOKEN }}
+          LIGHTNODE_PRIVATE_KEY: ${{ secrets.LIGHTNODE_PRIVATE_KEY }}
+          LIGHTNODE_SSH_PRIVATE_KEY: ${{ secrets.LIGHTNODE_SSH_PRIVATE_KEY }}
+          LIGHTNODE_SSH_KEY_UUID: ${{ secrets.LIGHTNODE_SSH_KEY_UUID }}
+          LIGHTNODE_PASSWORD: ${{ secrets.LIGHTNODE_PASSWORD }}
+          LIGHTNODE_REGION: ${{ secrets.LIGHTNODE_REGION }}
+          LIGHTNODE_ZONE: ${{ secrets.LIGHTNODE_ZONE }}
+          LIGHTNODE_IMAGE_NAME: ${{ secrets.LIGHTNODE_IMAGE_NAME }}
+        run: |
+          set +e
+          chmod +x action_tests/run_env_test.sh
+          chmod +x action_tests/common/*.sh
+          chmod +x action_tests/provision/*.sh
+          chmod +x action_tests/report/*.sh
+          mkdir -p action_tests/reports
+
+          bash action_tests/run_env_test.sh "${{ matrix.environment }}" 2>&1 | tee "action_tests/reports/${{ matrix.environment }}-full.log"
+          rc=${PIPESTATUS[0]}
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Validate result files
+        if: always()
+        env:
+          ENV_NAME: ${{ matrix.environment }}
+          TEST_RC: ${{ steps.run.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          results="action_tests/reports/${ENV_NAME}-results.jsonl"
+
+          {
+            echo "## Environment: ${ENV_NAME}"
+            echo ""
+            echo "| Metric | Value |"
+            echo "|--------|-------|"
+            echo "| Harness Exit | ${TEST_RC:-unset} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ ! -f "$results" ]]; then
+            echo "::warning::No result jsonl found: $results"
+            exit 0
+          fi
+
+          total=$(jq -s 'length' "$results")
+          passed=$(jq -s '[.[] | select(.status == "PASS")] | length' "$results")
+          failed=$(jq -s '[.[] | select(.status == "FAIL")] | length' "$results")
+          skipped=$(jq -s '[.[] | select(.status == "SKIP")] | length' "$results")
+
+          {
+            echo "| Total Checks | ${total} |"
+            echo "| Passed | ${passed} |"
+            echo "| Failed | ${failed} |"
+            echo "| Skipped | ${skipped} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: virttest-${{ matrix.environment }}-${{ github.run_number }}
+          path: |
+            action_tests/reports/*.md
+            action_tests/reports/*.jsonl
+            action_tests/reports/*.html
+            action_tests/reports/*.log
+          retention-days: 30
+
+      - name: Publish reports branch
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPORT_BRANCH: ${{ inputs.report_branch }}
+          ENV_NAME: ${{ matrix.environment }}
+        run: |
+          set -euo pipefail
+          TS=$(date -u '+%Y%m%d-%H%M%S')
+
+          git clone --depth 1 --branch "$REPORT_BRANCH" \
+            "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git" \
+            report-repo 2>/dev/null || {
+              mkdir -p report-repo
+              cd report-repo
+              git init
+              git checkout -b "$REPORT_BRANCH"
+              cd ..
+            }
+
+          mkdir -p "report-repo/reports/${ENV_NAME}/${TS}"
+          cp action_tests/reports/${ENV_NAME}-* "report-repo/reports/${ENV_NAME}/${TS}/" 2>/dev/null || true
+
+          KEEP=10
+          if [[ -d "report-repo/reports/${ENV_NAME}" ]]; then
+            i=0
+            while IFS= read -r d; do
+              i=$((i + 1))
+              if [[ $i -gt $KEEP ]]; then
+                rm -rf "$d"
+              fi
+            done < <(ls -d "report-repo/reports/${ENV_NAME}/"*/ 2>/dev/null | sort -r)
+          fi
+
+          bash action_tests/report/generate_index.sh "report-repo/reports" "report-repo/index.html"
+
+          cd report-repo
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add -A
+          git commit -m "report: ${ENV_NAME} ${TS}" || true
+          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git" "$REPORT_BRANCH" || true
