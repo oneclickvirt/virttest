@@ -109,6 +109,7 @@ wait_async_task() {
   local task_uuid="$1"
   local max_seconds="${2:-600}"
   local interval="${3:-15}"
+  local max_interval="${4:-30}"
   local elapsed=0
 
   while [[ "$elapsed" -lt "$max_seconds" ]]; do
@@ -127,10 +128,60 @@ wait_async_task() {
     [[ -n "$status" ]] || true
     sleep "$interval"
     elapsed=$((elapsed + interval))
+    if [[ "$interval" -lt "$max_interval" ]]; then
+      interval=$((interval * 2))
+      if [[ "$interval" -gt "$max_interval" ]]; then
+        interval="$max_interval"
+      fi
+    fi
   done
 
   echo "timeout waiting async task ${task_uuid}" >&2
   return 1
+}
+
+wait_instance_detail() {
+  local ecs_uuid="$1"
+  local max_seconds="${2:-300}"
+  local interval="${3:-5}"
+  local max_interval="${4:-30}"
+  local elapsed=0
+
+  while [[ "$elapsed" -lt "$max_seconds" ]]; do
+    local detail detail_body ipv4 ssh_user
+    detail="$(get_instance_detail "$ecs_uuid")"
+    detail_body="$(parse_body "$detail")"
+    ipv4="$(jq -r '.instance.publicIpAddress // empty' <<<"$detail_body")"
+    ssh_user="$(jq -r '.instance.sysAccount // "root"' <<<"$detail_body")"
+    if [[ -n "$ipv4" ]]; then
+      jq -cn \
+        --arg server_id "$ecs_uuid" \
+        --arg ipv4 "$ipv4" \
+        --arg password "$LIGHTNODE_PASSWORD" \
+        --arg ssh_user "$ssh_user" \
+        --arg region "$LIGHTNODE_REGION" \
+        --arg zone "$LIGHTNODE_ZONE" \
+        '{server_id:$server_id, ipv4:$ipv4, password:$password, ssh_user:$ssh_user, region:$region, zone:$zone, platform:"lightnode"}'
+      return 0
+    fi
+    sleep "$interval"
+    elapsed=$((elapsed + interval))
+    if [[ "$interval" -lt "$max_interval" ]]; then
+      interval=$((interval * 2))
+      if [[ "$interval" -gt "$max_interval" ]]; then
+        interval="$max_interval"
+      fi
+    fi
+  done
+
+  echo "timeout waiting instance detail for ${ecs_uuid}" >&2
+  return 1
+}
+
+cleanup_created_instance() {
+  local server_id="$1"
+  [[ -n "$server_id" ]] || return 0
+  destroy_instance --server-id "$server_id" >/dev/null 2>&1 || true
 }
 
 create_instance() {
@@ -175,15 +226,24 @@ create_instance() {
     exit 4
   }
 
-  [[ -z "$task_uuid" ]] || wait_async_task "$task_uuid" 900 15
+  if [[ -n "$task_uuid" ]]; then
+    if ! wait_async_task "$task_uuid" 900 15 30; then
+      cleanup_created_instance "$ecs_uuid"
+      exit 4
+    fi
+  fi
 
-  detail="$(get_instance_detail "$ecs_uuid")"
-  detail_body="$(parse_body "$detail")"
+  if ! detail_body="$(wait_instance_detail "$ecs_uuid" 300 5 30)"; then
+    cleanup_created_instance "$ecs_uuid"
+    exit 4
+  fi
+
   ipv4="$(jq -r '.instance.publicIpAddress // empty' <<<"$detail_body")"
   ssh_user="$(jq -r '.instance.sysAccount // "root"' <<<"$detail_body")"
 
   [[ -n "$ipv4" ]] || {
     echo "missing public ip for ${ecs_uuid}" >&2
+    cleanup_created_instance "$ecs_uuid"
     exit 4
   }
 
