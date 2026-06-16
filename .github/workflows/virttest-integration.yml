@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       environment:
-        description: "Environment to test (all runs sequentially)"
+        description: "Environment to test"
         required: true
         type: choice
         options:
@@ -28,17 +28,188 @@ on:
         required: false
         type: string
         default: "210"
+      report_keep_runs:
+        description: "Number of report runs to retain per environment"
+        required: false
+        type: string
+        default: "7"
+      report_keep_days:
+        description: "Maximum age in days for retained report runs (0 disables age pruning)"
+        required: false
+        type: string
+        default: "0"
+      remote_max_parallel:
+        description: "Remote environment supply pool size"
+        required: false
+        type: string
+        default: "3"
+      dry_run:
+        description: "Validate configuration and provider inventory without creating hosts"
+        required: false
+        type: boolean
+        default: false
+      cleanup_stale_instances:
+        description: "Clean stale LightNode instances with the configured virttest prefix before provisioning"
+        required: false
+        type: boolean
+        default: false
+      pr_number:
+        description: "Optional pull request number to comment with the report summary"
+        required: false
+        type: string
+        default: ""
 
 jobs:
+  local-harness:
+    name: "Local Harness: ${{ matrix.arch }}"
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install local dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq curl openssh-client sshpass shellcheck ruby
+
+      - name: Run local harness checks
+        env:
+          LOCAL_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          chmod +x action_tests/tests/run_local_checks.sh
+          chmod +x action_tests/*.sh action_tests/common/*.sh action_tests/provision/*.sh action_tests/report/*.sh
+
+          echo "Runner architecture: $(uname -m)"
+          bash action_tests/tests/run_local_checks.sh
+          shellcheck -x \
+            action_tests/run_env_test.sh \
+            action_tests/common/test_framework.sh \
+            action_tests/common/runtime_helpers.sh \
+            action_tests/common/redact_stream.sh \
+            action_tests/provision/lightnode.sh \
+            action_tests/report/generate_index.sh \
+            action_tests/report/prune_reports.sh \
+            action_tests/tests/run_local_checks.sh
+
+          env_name="local-${LOCAL_ARCH}"
+          mkdir -p action_tests/reports
+          jq -cn \
+            --arg env "$env_name" \
+            --arg arch "$LOCAL_ARCH" \
+            --arg machine "$(uname -m)" \
+            --arg ts "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+            '{timestamp:$ts, environment:$env, check:"local_harness", status:"PASS", duration_seconds:0, message:("runner architecture " + $arch + " (" + $machine + ") passed local checks")}' \
+            > "action_tests/reports/${env_name}-results.jsonl"
+          {
+            echo "# Virttest Local Harness: ${LOCAL_ARCH}"
+            echo ""
+            echo "- Runner machine: $(uname -m)"
+            echo "- Status: PASS"
+          } > "action_tests/reports/${env_name}-report.md"
+
+      - name: Upload local harness artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: virttest-local-${{ matrix.arch }}-${{ github.run_number }}
+          path: |
+            action_tests/reports/*.md
+            action_tests/reports/*.jsonl
+            action_tests/reports/*.json
+            action_tests/reports/*.prom
+            action_tests/reports/*.log
+          retention-days: 30
+
+  publish-local-reports:
+    name: "Publish Local Harness Reports"
+    if: always()
+    needs: local-harness
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install report dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Download local harness artifacts
+        uses: actions/download-artifact@v6
+        continue-on-error: true
+        with:
+          pattern: virttest-local-*-${{ github.run_number }}
+          path: action_tests/reports
+          merge-multiple: true
+
+      - name: Publish local report branch entries
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPORT_BRANCH: ${{ inputs.report_branch }}
+          REPORT_KEEP_RUNS: ${{ inputs.report_keep_runs }}
+          REPORT_KEEP_DAYS: ${{ inputs.report_keep_days }}
+        run: |
+          set -euo pipefail
+          TS=$(date -u '+%Y%m%d-%H%M%S')
+
+          git clone --depth 1 --branch "$REPORT_BRANCH" \
+            "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git" \
+            report-repo 2>/dev/null || {
+              mkdir -p report-repo
+              cd report-repo
+              git init
+              git checkout -b "$REPORT_BRANCH"
+              cd ..
+            }
+
+          KEEP="${REPORT_KEEP_RUNS:-7}"
+          if ! [[ "$KEEP" =~ ^[0-9]+$ ]] || [[ "$KEEP" -lt 1 ]]; then
+            KEEP=7
+          fi
+
+          shopt -s nullglob
+          for result_file in action_tests/reports/local-*-results.jsonl; do
+            env_name="$(basename "$result_file" -results.jsonl)"
+            mkdir -p "report-repo/reports/${env_name}/${TS}"
+            cp action_tests/reports/${env_name}-* "report-repo/reports/${env_name}/${TS}/" 2>/dev/null || true
+            bash action_tests/report/prune_reports.sh "report-repo/reports/${env_name}" "$KEEP" "${REPORT_KEEP_DAYS:-0}"
+          done
+
+          bash action_tests/report/generate_index.sh "report-repo/reports" "report-repo/index.html"
+
+          cd report-repo
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add -A
+          git commit -m "report: local harness ${TS}" || true
+          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git" "$REPORT_BRANCH"
+
   integration:
     name: "Test: ${{ matrix.environment }}"
+    needs: local-harness
     runs-on: ubuntu-latest
     timeout-minutes: ${{ fromJSON(inputs.timeout_minutes) }}
     permissions:
       contents: write
     strategy:
       fail-fast: false
-      max-parallel: 1
+      max-parallel: ${{ fromJSON(inputs.remote_max_parallel) }}
       matrix:
         environment: ${{ inputs.environment == 'all' && fromJSON('["pve","incus","docker","lxd","containerd","podman","qemu","kubevirt"]') || fromJSON(format('["{0}"]', inputs.environment)) }}
 
@@ -51,19 +222,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y jq curl openssh-client sshpass
 
-      - name: Validate scripts
+      - name: Validate local harness
         run: |
           set -euo pipefail
-          errs=0
-          while IFS= read -r f; do
-            if ! bash -n "$f"; then
-              echo "::error::bash syntax error in $f"
-              errs=$((errs + 1))
-            fi
-          done < <(find action_tests -type f -name "*.sh" | sort)
-          if [[ $errs -gt 0 ]]; then
-            exit 1
-          fi
+          chmod +x action_tests/tests/run_local_checks.sh
+          bash action_tests/tests/run_local_checks.sh
 
       - name: Run environment test
         id: run
@@ -76,6 +239,9 @@ jobs:
           LIGHTNODE_REGION: ${{ secrets.LIGHTNODE_REGION }}
           LIGHTNODE_ZONE: ${{ secrets.LIGHTNODE_ZONE }}
           LIGHTNODE_IMAGE_NAME: ${{ secrets.LIGHTNODE_IMAGE_NAME }}
+          VIRTTEST_TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
+          VIRTTEST_DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
+          VIRTTEST_CLEANUP_STALE: ${{ inputs.cleanup_stale_instances && '1' || '0' }}
         run: |
           set +e
           chmod +x action_tests/run_env_test.sh
@@ -84,7 +250,13 @@ jobs:
           chmod +x action_tests/report/*.sh
           mkdir -p action_tests/reports
 
-          bash action_tests/run_env_test.sh "${{ matrix.environment }}" 2>&1 | tee "action_tests/reports/${{ matrix.environment }}-full.log"
+          args=()
+          if [[ "${VIRTTEST_DRY_RUN:-0}" == "1" ]]; then
+            args+=(--dry-run)
+          fi
+          bash action_tests/run_env_test.sh "${args[@]}" "${{ matrix.environment }}" 2>&1 \
+            | bash action_tests/common/redact_stream.sh \
+            | tee "action_tests/reports/${{ matrix.environment }}-full.log"
           rc=${PIPESTATUS[0]}
           echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
           exit 0
@@ -114,12 +286,14 @@ jobs:
           total=$(jq -s 'length' "$results")
           passed=$(jq -s '[.[] | select(.status == "PASS")] | length' "$results")
           failed=$(jq -s '[.[] | select(.status == "FAIL")] | length' "$results")
+          warned=$(jq -s '[.[] | select(.status == "WARN")] | length' "$results")
           skipped=$(jq -s '[.[] | select(.status == "SKIP")] | length' "$results")
 
           {
             echo "| Total Checks | ${total} |"
             echo "| Passed | ${passed} |"
             echo "| Failed | ${failed} |"
+            echo "| Warnings | ${warned} |"
             echo "| Skipped | ${skipped} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -131,16 +305,54 @@ jobs:
           path: |
             action_tests/reports/*.md
             action_tests/reports/*.jsonl
+            action_tests/reports/*.json
             action_tests/reports/*.html
+            action_tests/reports/*.prom
             action_tests/reports/*.log
           retention-days: 30
 
-      - name: Publish reports branch
+      - name: Fail on environment test failures
         if: always()
+        env:
+          TEST_RC: ${{ steps.run.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          if [[ "${TEST_RC:-1}" != "0" ]]; then
+            echo "::error::Environment test failed with exit code ${TEST_RC:-unset}"
+            exit "${TEST_RC:-1}"
+          fi
+
+  publish-integration-reports:
+    name: "Publish Integration Reports"
+    if: always()
+    needs: integration
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install report dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Download integration artifacts
+        uses: actions/download-artifact@v6
+        continue-on-error: true
+        with:
+          pattern: virttest-*-${{ github.run_number }}
+          path: action_tests/reports
+          merge-multiple: true
+
+      - name: Publish integration report branch entries
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPORT_BRANCH: ${{ inputs.report_branch }}
-          ENV_NAME: ${{ matrix.environment }}
+          REPORT_KEEP_RUNS: ${{ inputs.report_keep_runs }}
+          REPORT_KEEP_DAYS: ${{ inputs.report_keep_days }}
         run: |
           set -euo pipefail
           TS=$(date -u '+%Y%m%d-%H%M%S')
@@ -155,18 +367,26 @@ jobs:
               cd ..
             }
 
-          mkdir -p "report-repo/reports/${ENV_NAME}/${TS}"
-          cp action_tests/reports/${ENV_NAME}-* "report-repo/reports/${ENV_NAME}/${TS}/" 2>/dev/null || true
+          KEEP="${REPORT_KEEP_RUNS:-7}"
+          if ! [[ "$KEEP" =~ ^[0-9]+$ ]] || [[ "$KEEP" -lt 1 ]]; then
+            KEEP=7
+          fi
 
-          KEEP=10
-          if [[ -d "report-repo/reports/${ENV_NAME}" ]]; then
-            i=0
-            while IFS= read -r d; do
-              i=$((i + 1))
-              if [[ $i -gt $KEEP ]]; then
-                rm -rf "$d"
-              fi
-            done < <(ls -d "report-repo/reports/${ENV_NAME}/"*/ 2>/dev/null | sort -r)
+          published=0
+          shopt -s nullglob
+          for result_file in action_tests/reports/*-results.jsonl; do
+            env_name="$(basename "$result_file" -results.jsonl)"
+            if [[ "$env_name" == local-* ]]; then
+              continue
+            fi
+            mkdir -p "report-repo/reports/${env_name}/${TS}"
+            cp action_tests/reports/${env_name}-* "report-repo/reports/${env_name}/${TS}/" 2>/dev/null || true
+            bash action_tests/report/prune_reports.sh "report-repo/reports/${env_name}" "$KEEP" "${REPORT_KEEP_DAYS:-0}"
+            published=$((published + 1))
+          done
+
+          if [[ "$published" -eq 0 ]]; then
+            echo "No integration reports found to publish."
           fi
 
           bash action_tests/report/generate_index.sh "report-repo/reports" "report-repo/index.html"
@@ -175,5 +395,48 @@ jobs:
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
           git add -A
-          git commit -m "report: ${ENV_NAME} ${TS}" || true
-          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git" "$REPORT_BRANCH" || true
+          git commit -m "report: integration ${TS}" || true
+          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git" "$REPORT_BRANCH"
+
+  comment-pr:
+    name: "Comment PR"
+    if: always() && inputs.pr_number != ''
+    needs:
+      - publish-local-reports
+      - integration
+      - publish-integration-reports
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+      - name: Publish PR report comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          REPORT_BRANCH: ${{ inputs.report_branch }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          INTEGRATION_RESULT: ${{ needs.integration.result }}
+          INTEGRATION_REPORT_RESULT: ${{ needs.publish-integration-reports.result }}
+          LOCAL_REPORT_RESULT: ${{ needs.publish-local-reports.result }}
+        run: |
+          set -euo pipefail
+          report_url="https://github.com/${{ github.repository }}/tree/${REPORT_BRANCH}"
+          pages_url="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/"
+          body_file="$(mktemp)"
+          {
+            echo "## Virttest integration"
+            echo ""
+            echo "- Environment: ${ENVIRONMENT}"
+            echo "- Dry run: ${DRY_RUN}"
+            echo "- Remote integration result: ${INTEGRATION_RESULT}"
+            echo "- Remote report publish result: ${INTEGRATION_REPORT_RESULT}"
+            echo "- Local report publish result: ${LOCAL_REPORT_RESULT}"
+            echo "- Report branch: ${report_url}"
+            echo "- GitHub Pages URL if enabled: ${pages_url}"
+            echo "- Workflow run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          } >"$body_file"
+          body="$(<"$body_file")"
+          gh api "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" -f body="$body"

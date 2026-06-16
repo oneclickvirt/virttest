@@ -45,6 +45,41 @@ report_append_row() {
   echo "| ${check_name} | ${status} | ${duration} | ${message} |" >>"$report_file"
 }
 
+prometheus_escape_label() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/ }"
+  printf '%s' "$value"
+}
+
+prometheus_init() {
+  local prometheus_file="$1"
+  cat >"$prometheus_file" <<'EOF'
+# HELP virttest_check_status Check status encoded as 1 for the emitted status label.
+# TYPE virttest_check_status gauge
+# HELP virttest_check_duration_seconds Check duration in seconds.
+# TYPE virttest_check_duration_seconds gauge
+EOF
+}
+
+prometheus_add() {
+  local prometheus_file="$1"
+  local env_name="$2"
+  local check_name="$3"
+  local status="$4"
+  local duration="$5"
+  local env_label check_label status_label
+  [[ -n "${prometheus_file:-}" ]] || return 0
+  env_label="$(prometheus_escape_label "$env_name")"
+  check_label="$(prometheus_escape_label "$check_name")"
+  status_label="$(prometheus_escape_label "$status")"
+  {
+    printf 'virttest_check_status{environment="%s",check="%s",status="%s"} 1\n' "$env_label" "$check_label" "$status_label"
+    printf 'virttest_check_duration_seconds{environment="%s",check="%s"} %s\n' "$env_label" "$check_label" "$duration"
+  } >>"$prometheus_file"
+}
+
 results_init() {
   local results_file="$1"
   : >"$results_file"
@@ -67,6 +102,7 @@ results_add() {
     --arg duration "$duration" \
     --arg message "$message" \
     '{timestamp:$ts, environment:$env, check:$check, status:$status, duration_seconds:($duration|tonumber), message:$message}' >>"$results_file"
+  prometheus_add "${PROMETHEUS_FILE:-}" "$env_name" "$check_name" "$status" "$duration"
 }
 
 run_check() {
