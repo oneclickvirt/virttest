@@ -122,7 +122,7 @@ jobs:
 
       - name: Upload local harness artifacts
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: virttest-local-${{ matrix.arch }}-${{ github.run_number }}
           path: |
@@ -299,7 +299,7 @@ jobs:
 
       - name: Upload artifacts
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: virttest-${{ matrix.environment }}-${{ github.run_number }}
           path: |
