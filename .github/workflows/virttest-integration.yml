@@ -151,7 +151,7 @@ jobs:
           sudo apt-get install -y jq
 
       - name: Download local harness artifacts
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           pattern: virttest-local-*-${{ github.run_number }}
@@ -340,7 +340,7 @@ jobs:
           sudo apt-get install -y jq
 
       - name: Download integration artifacts
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           pattern: virttest-*-${{ github.run_number }}
