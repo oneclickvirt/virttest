@@ -395,15 +395,16 @@ preflight_provider() {
   export_provider_context
   export VIRTTEST_LIGHTNODE_API_COUNTER_FILE="$API_COUNTER_FILE"
   timeout_seconds="$(remaining_timeout "$VIRTTEST_PRECHECK_TIMEOUT_SECONDS")"
-  if run_with_timeout "$timeout_seconds" "${PROVISION_DIR}/lightnode.sh" validate >"$json_file" 2>"$out_file"; then
+  if run_with_timeout "$timeout_seconds" bash "${PROVISION_DIR}/lightnode.sh" validate >"$json_file" 2>"$out_file"; then
     ended=$(date +%s)
     duration=$((ended - started))
     report_append_row "$REPORT_FILE" "preflight_provider" "PASS" "$duration" "ok"
     results_add "$RESULTS_FILE" "$ENV_NAME" "preflight_provider" "PASS" "$duration" "ok"
     return 0
+  else
+    preflight_rc=$?
   fi
 
-  preflight_rc=$?
   ended=$(date +%s)
   duration=$((ended - started))
   if [[ "$preflight_rc" -eq "$EXIT_PROVIDER_UNAVAILABLE" ]]; then
@@ -429,7 +430,7 @@ cleanup_stale_hosts() {
   export_provider_context
   export VIRTTEST_LIGHTNODE_API_COUNTER_FILE="$API_COUNTER_FILE"
   timeout_seconds="$(remaining_timeout "$VIRTTEST_PRECHECK_TIMEOUT_SECONDS")"
-  if run_with_timeout "$timeout_seconds" "${PROVISION_DIR}/lightnode.sh" cleanup-stale >"$json_file" 2>"$out_file"; then
+  if run_with_timeout "$timeout_seconds" bash "${PROVISION_DIR}/lightnode.sh" cleanup-stale >"$json_file" 2>"$out_file"; then
     ended=$(date +%s)
     duration=$((ended - started))
     report_append_row "$REPORT_FILE" "cleanup_stale_hosts" "PASS" "$duration" "ok"
@@ -450,7 +451,7 @@ provision_host() {
   export_provider_context
   export VIRTTEST_LIGHTNODE_API_COUNTER_FILE="$API_COUNTER_FILE"
   timeout_seconds="$(remaining_timeout "$VIRTTEST_PROVISION_TIMEOUT_SECONDS")"
-  if run_with_timeout "$timeout_seconds" "${PROVISION_DIR}/lightnode.sh" create >"${HOST_META_FILE}" 2>"$out_file"; then
+  if run_with_timeout "$timeout_seconds" bash "${PROVISION_DIR}/lightnode.sh" create >"${HOST_META_FILE}" 2>"$out_file"; then
     ended=$(date +%s)
     duration=$((ended - started))
     report_append_row "$REPORT_FILE" "provision_host" "PASS" "$duration" "ok"
@@ -593,7 +594,7 @@ cleanup() {
     log_info "destroy host id=${SERVER_ID}"
     export_provider_context
     export VIRTTEST_LIGHTNODE_API_COUNTER_FILE="$API_COUNTER_FILE"
-    if "${PROVISION_DIR}/lightnode.sh" destroy --server-id "$SERVER_ID" >/dev/null 2>"${REPORT_DIR}/${ENV_NAME}-destroy.log"; then
+    if bash "${PROVISION_DIR}/lightnode.sh" destroy --server-id "$SERVER_ID" >/dev/null 2>"${REPORT_DIR}/${ENV_NAME}-destroy.log"; then
       cleanup_status="PASS"
       cleanup_message="host destroyed"
     else

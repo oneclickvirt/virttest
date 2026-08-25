@@ -17,7 +17,7 @@
 
 - `.github/workflows/virttest-integration.yml`：手动触发入口、amd64/arm64 本地验证、远程环境矩阵编排、artifact 上传、报告分支发布和最终失败状态回传
 - `action_tests/run_env_test.sh`：单环境执行入口，负责输入校验、主机生命周期、SSH 准备、远端仓库准备、环境测试和结果落盘
-- `action_tests/provision/lightnode.sh`：LightNode API 适配层，负责区域/可用区选择、套餐和镜像选择、实例创建、异步任务等待和销毁
+- `action_tests/provision/lightnode.sh`：LightNode API 适配层，负责区域/可用区选择、套餐和镜像选择、实例创建、系统重装、异步任务等待和销毁
 - `action_tests/common/test_framework.sh`：Markdown 报告、JSONL 结果、日志和通用检查输出
 - `action_tests/common/runtime_helpers.sh`：参数解析、deadline、超时/重试包装和每次运行的资源标识生成
 - `action_tests/common/redact_stream.sh`：CI 日志脱敏过滤器
@@ -41,6 +41,8 @@
 - `LIGHTNODE_REGION`：指定区域；如果只设置区域，脚本会选择该区域下第一个可用区
 - `LIGHTNODE_ZONE`：指定可用区；如果只设置可用区，脚本会反查匹配区域
 - `LIGHTNODE_IMAGE_NAME`：宿主机镜像名；未设置时 `lxd/incus` 使用 `ubuntu`，其他环境使用 `debian`
+- LightNode 套餐默认选择精确 `2 CPU / 4 GB` 的宿主机；如果所选区域/可用区没有匹配套餐，会按供应商不可用处理，不会静默创建更低配置。
+- `LIGHTNODE_PACKAGE_CODE`：可选的指定区域/可用区精确套餐覆盖
 - `LIGHTNODE_INSTANCE_NAME_PREFIX`：宿主机名称前缀；创建名称格式为 `<prefix>-<UTC 时间戳>-<environment>-<resource suffix>`，用于并发隔离和孤实例清理
 
 ## 执行时序

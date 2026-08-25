@@ -32,7 +32,7 @@ Failure handling:
 ## Files
 
 - `run_env_test.sh`: single-environment runner
-- `provision/lightnode.sh`: LightNode create/release implementation
+- `provision/lightnode.sh`: LightNode create/reinstall/release implementation
 - `common/test_framework.sh`: logging, Markdown reports, and JSONL results
 - `common/runtime_helpers.sh`: argument parsing, deadlines, timeout/retry wrappers, and resource identifiers
 - `common/redact_stream.sh`: CI log redaction filter
@@ -110,6 +110,8 @@ GitHub Actions installs the base dependencies automatically.
 - `LIGHTNODE_ZONE`
 - `LIGHTNODE_IMAGE_NAME`
 - `LIGHTNODE_API_BASE`
+- LightNode package selection defaults to an exact `2 CPU / 4 GB` host. If the selected region/zone has no matching package, the provider is treated as unavailable instead of silently creating a lower tier host.
+- `LIGHTNODE_PACKAGE_CODE`: optional exact package override for a selected region/zone
 - `LIGHTNODE_INSTANCE_NAME_PREFIX`: created host names use `<prefix>-<UTC timestamp>-<environment>-<resource suffix>` so parallel runs do not collide and stale cleanup can identify old virttest hosts
 - `LIGHTNODE_HOURLY_COST_USD`: optional estimate used for resource accounting
 - `VIRTTEST_STEP_TIMEOUT_SECONDS`, `VIRTTEST_PROVISION_TIMEOUT_SECONDS`, `VIRTTEST_REMOTE_RETRIES`

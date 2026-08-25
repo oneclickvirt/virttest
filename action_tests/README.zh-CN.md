@@ -32,7 +32,7 @@
 ## 文件说明
 
 - `run_env_test.sh`：单环境测试入口
-- `provision/lightnode.sh`：LightNode 创建/销毁实现
+- `provision/lightnode.sh`：LightNode 创建/系统重装/销毁实现
 - `common/test_framework.sh`：日志、Markdown 报告和 JSONL 结果工具
 - `common/runtime_helpers.sh`：参数解析、deadline、超时/重试包装和资源标识生成
 - `common/redact_stream.sh`：CI 日志脱敏过滤器
@@ -110,6 +110,8 @@ GitHub Actions 会自动安装基础依赖。
 - `LIGHTNODE_ZONE`
 - `LIGHTNODE_IMAGE_NAME`
 - `LIGHTNODE_API_BASE`
+- LightNode 套餐默认选择精确 `2 CPU / 4 GB` 的宿主机；如果所选区域/可用区没有匹配套餐，会按供应商不可用处理，不会静默创建更低配置。
+- `LIGHTNODE_PACKAGE_CODE`：可选的指定区域/可用区精确套餐覆盖
 - `LIGHTNODE_INSTANCE_NAME_PREFIX`：创建的宿主机名称使用 `<prefix>-<UTC 时间戳>-<environment>-<resource suffix>`，避免并发运行碰撞，并让孤实例清理能识别旧 virttest 主机
 - `LIGHTNODE_HOURLY_COST_USD`：用于资源核算的可选小时成本估算
 - `VIRTTEST_STEP_TIMEOUT_SECONDS`、`VIRTTEST_PROVISION_TIMEOUT_SECONDS`、`VIRTTEST_REMOTE_RETRIES`

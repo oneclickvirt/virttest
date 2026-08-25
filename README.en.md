@@ -17,7 +17,7 @@ Language switch: English | [简体中文](README.zh-CN.md)
 
 - `.github/workflows/virttest-integration.yml`: manual workflow entry, amd64/arm64 local validation, remote environment matrix orchestration, artifact upload, report branch publishing, and final job failure propagation
 - `action_tests/run_env_test.sh`: single-environment runner for input validation, host lifecycle, SSH readiness, remote repository setup, environment checks, and result files
-- `action_tests/provision/lightnode.sh`: LightNode API adapter for region/zone selection, package and image selection, instance creation, async task polling, and release
+- `action_tests/provision/lightnode.sh`: LightNode API adapter for region/zone selection, package and image selection, instance creation, OS reinstall, async task polling, and release
 - `action_tests/common/test_framework.sh`: Markdown reports, JSONL results, logging, and common check output
 - `action_tests/common/runtime_helpers.sh`: argument parsing, deadline handling, timeout/retry wrappers, and per-run resource identifiers
 - `action_tests/common/redact_stream.sh`: CI log redaction filter
@@ -41,6 +41,8 @@ Optional configuration:
 - `LIGHTNODE_REGION`: target region; if only the region is set, the runner selects its first available zone
 - `LIGHTNODE_ZONE`: target zone; if only the zone is set, the runner finds the matching region
 - `LIGHTNODE_IMAGE_NAME`: host image name; defaults to `ubuntu` for `lxd/incus` and `debian` for the other environments
+- LightNode package selection defaults to an exact `2 CPU / 4 GB` host. If the selected region/zone has no matching package, the provider is treated as unavailable instead of silently creating a lower tier host.
+- `LIGHTNODE_PACKAGE_CODE`: optional exact package override for a selected region/zone
 - `LIGHTNODE_INSTANCE_NAME_PREFIX`: host name prefix; created hosts use `<prefix>-<UTC timestamp>-<environment>-<resource suffix>` for parallel run isolation and stale cleanup
 
 ## Execution Order

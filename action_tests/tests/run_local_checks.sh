@@ -194,10 +194,10 @@ case "$url" in
   */package/list*)
     case "$url" in
       *regionCode=eu*)
-        printf '{"packages":[{"regionCode":"eu","zoneCode":"eu-a","packageCode":"pkg-eu"}]}\n200\n'
+        printf '{"packages":[{"regionCode":"eu","zoneCode":"eu-a","cpu":1,"memory":2,"bandwidth":2,"dataDiskSize":0,"publicIpChargeMode":"PayByBandwidth","packageCode":"pkg-eu-small"},{"regionCode":"eu","zoneCode":"eu-a","cpu":2,"memory":4,"freeFlow":2000,"dataDiskSize":100,"publicIpChargeMode":"PayByTraffic","packageCode":"pkg-eu-c2m4-traffic"},{"regionCode":"eu","zoneCode":"eu-a","cpu":2,"memory":4,"bandwidth":5,"dataDiskSize":100,"publicIpChargeMode":"PayByBandwidth","packageCode":"pkg-eu-c2m4"}]}\n200\n'
         ;;
       *)
-        printf '{"packages":[{"regionCode":"us","zoneCode":"us-a","packageCode":"pkg-small"}]}\n200\n'
+        printf '{"packages":[{"regionCode":"us","zoneCode":"us-a","cpu":1,"memory":2,"bandwidth":2,"dataDiskSize":0,"publicIpChargeMode":"PayByBandwidth","packageCode":"pkg-small"},{"regionCode":"us","zoneCode":"us-a","cpu":2,"memory":4,"freeFlow":2000,"dataDiskSize":100,"publicIpChargeMode":"PayByTraffic","packageCode":"pkg-c2m4-traffic"},{"regionCode":"us","zoneCode":"us-a","cpu":2,"memory":4,"bandwidth":10,"dataDiskSize":300,"publicIpChargeMode":"PayByBandwidth","packageCode":"pkg-c2m4-large"},{"regionCode":"us","zoneCode":"us-a","cpu":2,"memory":4,"bandwidth":5,"dataDiskSize":100,"publicIpChargeMode":"PayByBandwidth","packageCode":"pkg-c2m4"}]}\n200\n'
         ;;
     esac
     ;;
@@ -219,12 +219,24 @@ case "$url" in
   */instance/detail*)
     printf '{"instance":{"publicIpAddress":"203.0.113.10","sysAccount":"root"}}\n200\n'
     ;;
+  */instance/stop)
+    if [[ -n "${MOCK_CAPTURE_STOP_PAYLOAD:-}" ]]; then
+      printf '%s\n' "$data" >"$MOCK_CAPTURE_STOP_PAYLOAD"
+    fi
+    printf '{"asyncTaskUUID":"task-stop","httpStatus":202,"rowCount":0}\n202\n'
+    ;;
   */instance/release)
     if [[ "${MOCK_RELEASE_FAIL:-}" == "1" ]]; then
       printf '{"message":"release failed"}\n500\n'
       exit 0
     fi
     printf '{"asyncTaskInfo":{"asyncTaskUUID":"task-release"}}\n202\n'
+    ;;
+  */instance/reinstallSystem)
+    if [[ -n "${MOCK_CAPTURE_REINSTALL_PAYLOAD:-}" ]]; then
+      printf '%s\n' "$data" >"$MOCK_CAPTURE_REINSTALL_PAYLOAD"
+    fi
+    printf '{"asyncTaskUUID":"task-reinstall","httpStatus":202,"rowCount":0}\n202\n'
     ;;
   *)
     printf '{"message":"unexpected url","url":"%s"}\n404\n' "$url"
@@ -252,6 +264,7 @@ jq -e '
   .password == "VtPass123!"
 	' <<<"$lightnode_output" >/dev/null
 jq -e '.packageConfig.instanceName | test("^virttest-[0-9]{14}-docker-123456$")' "${TMP_DIR}/create_payload.json" >/dev/null
+jq -e '.packageConfig.packageCode == "pkg-c2m4"' "${TMP_DIR}/create_payload.json" >/dev/null
 
 lightnode_validate_output="$(
   PATH="${mock_bin}:$PATH" \
@@ -260,7 +273,7 @@ lightnode_validate_output="$(
   LIGHTNODE_REGION="us" \
   bash "${ACTION_TESTS_DIR}/provision/lightnode.sh" validate
 )"
-jq -e '.status == "ok" and .platform == "lightnode" and .package_code == "pkg-small"' <<<"$lightnode_validate_output" >/dev/null
+jq -e '.status == "ok" and .platform == "lightnode" and .package_code == "pkg-c2m4"' <<<"$lightnode_validate_output" >/dev/null
 
 lightnode_zone_output="$(
   PATH="${mock_bin}:$PATH" \
@@ -270,6 +283,19 @@ lightnode_zone_output="$(
   bash "${ACTION_TESTS_DIR}/provision/lightnode.sh" create
 )"
 jq -e '.region == "eu" and .zone == "eu-a"' <<<"$lightnode_zone_output" >/dev/null
+
+lightnode_reinstall_output="$(
+  PATH="${mock_bin}:$PATH" \
+  MOCK_CAPTURE_STOP_PAYLOAD="${TMP_DIR}/stop_payload.json" \
+  MOCK_CAPTURE_REINSTALL_PAYLOAD="${TMP_DIR}/reinstall_payload.json" \
+  LIGHTNODE_TOKEN="token" \
+  LIGHTNODE_PASSWORD="VtPass123!" \
+  LIGHTNODE_REGION="us" \
+  bash "${ACTION_TESTS_DIR}/provision/lightnode.sh" reinstall --server-id ecs-1
+)"
+jq -e '.status == "reinstalled" and .server_id == "ecs-1" and .image_uuid == "img-debian"' <<<"$lightnode_reinstall_output" >/dev/null
+jq -e '.ecsResourceUUID == "ecs-1" and .forceStop == true' "${TMP_DIR}/stop_payload.json" >/dev/null
+jq -e '.ecsResourceUUID == "ecs-1" and .password == "VtPass123!" and .imageResourceUUID == "img-debian" and .regionCode == "us" and .sshKeyResourceUUID == null' "${TMP_DIR}/reinstall_payload.json" >/dev/null
 
 set +e
 lightnode_unavailable_output="$(
@@ -323,6 +349,25 @@ PATH="${mock_bin}:$PATH" \
 assert_file_contains "${dry_run_reports}/docker-report.md" "| dry_run | PASS | 0 |"
 jq -e 'select(.check == "dry_run" and .status == "PASS")' "${dry_run_reports}/docker-results.jsonl" >/dev/null
 assert_file_contains "${dry_run_reports}/docker-metrics.prom" "virttest_check_status"
+
+preflight_fail_reports="${TMP_DIR}/preflight_fail_reports"
+set +e
+PATH="${mock_bin}:$PATH" \
+  MOCK_LIGHTNODE_AUTH_FAIL=1 \
+  VIRTTEST_REPORT_DIR="$preflight_fail_reports" \
+  LIGHTNODE_TOKEN="token" \
+  LIGHTNODE_PASSWORD="VtPass123!" \
+  LIGHTNODE_REGION="us" \
+  bash "${ACTION_TESTS_DIR}/run_env_test.sh" --dry-run docker >"${TMP_DIR}/preflight_fail.out" 2>&1
+preflight_fail_rc=$?
+set -e
+if [[ "$preflight_fail_rc" -ne 1 ]]; then
+  fail "preflight provider failure should fail dry-run, got ${preflight_fail_rc}"
+fi
+assert_file_contains "${preflight_fail_reports}/docker-report.md" "| preflight_provider | FAIL |"
+if grep -Fq "| dry_run | PASS |" "${preflight_fail_reports}/docker-report.md"; then
+  fail "dry-run passed after preflight provider failure"
+fi
 
 log "dry-run without ssh tools"
 dry_run_minimal_bin="${TMP_DIR}/dry-run-minimal-bin"

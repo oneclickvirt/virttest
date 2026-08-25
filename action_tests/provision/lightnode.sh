@@ -12,10 +12,13 @@ LIGHTNODE_REGION="${LIGHTNODE_REGION:-}"
 LIGHTNODE_ZONE="${LIGHTNODE_ZONE:-}"
 LIGHTNODE_PASSWORD="${LIGHTNODE_PASSWORD:-}"
 LIGHTNODE_IMAGE_NAME="${LIGHTNODE_IMAGE_NAME:-debian}"
+LIGHTNODE_PACKAGE_CODE="${LIGHTNODE_PACKAGE_CODE:-}"
 LIGHTNODE_INSTANCE_NAME_PREFIX="${LIGHTNODE_INSTANCE_NAME_PREFIX:-virttest}"
 LIGHTNODE_API_RETRIES="${LIGHTNODE_API_RETRIES:-3}"
 LIGHTNODE_API_RETRY_DELAY_SECONDS="${LIGHTNODE_API_RETRY_DELAY_SECONDS:-2}"
 LIGHTNODE_CLEANUP_STALE_SECONDS="${LIGHTNODE_CLEANUP_STALE_SECONDS:-43200}"
+LIGHTNODE_DEFAULT_PACKAGE_CPU=2
+LIGHTNODE_DEFAULT_PACKAGE_MEMORY_GB=4
 VIRTTEST_ENV_NAME="${VIRTTEST_ENV_NAME:-}"
 VIRTTEST_RESOURCE_SUFFIX="${VIRTTEST_RESOURCE_SUFFIX:-}"
 
@@ -84,6 +87,7 @@ api_request() {
 parse_body() { sed '$d' <<<"$1"; }
 parse_code() { tail -1 <<<"$1"; }
 is_success_code() { [[ "$1" == "200" || "$1" == "202" ]]; }
+extract_async_task_uuid() { jq -r '.asyncTaskInfo.asyncTaskUUID // .asyncTaskUUID // empty' <<<"$1"; }
 
 handle_inventory_error() {
   local action="$1"
@@ -109,7 +113,7 @@ get_packages() {
 }
 
 get_images() {
-  local qs="pageSize=100"
+  local qs="page=1&pageSize=50"
   qs="${qs}&imageType=System"
   [[ -n "$LIGHTNODE_REGION" ]] && qs="${qs}&regionCode=${LIGHTNODE_REGION}"
   api_request GET "/image/list?${qs}"
@@ -124,8 +128,7 @@ get_async_task() {
 }
 
 get_instances() {
-  local qs="pageSize=100"
-  [[ -n "$LIGHTNODE_REGION" ]] && qs="${qs}&regionCode=${LIGHTNODE_REGION}"
+  local qs="regionCode=${LIGHTNODE_REGION}&zoneCode=${LIGHTNODE_ZONE}&page=1&pageSize=50"
   api_request GET "/instance/list?${qs}"
 }
 
@@ -176,10 +179,31 @@ get_package_code() {
   is_success_code "$code" || {
     handle_inventory_error "failed to list packages" "$code"
   }
-  jq -r --arg region "$LIGHTNODE_REGION" --arg zone "$LIGHTNODE_ZONE" '
-    [.packages[]? | select((.regionCode // "") == $region) | select(($zone == "") or ((.zoneCode // "") == $zone) or ((.zoneCode // "") == ""))][0].packageCode //
-    [.packages[]? | select((.regionCode // "") == $region)][0].packageCode //
-    (if ([.packages[]? | select((.regionCode // "") != "")] | length) > 0 then empty else (.packages[0].packageCode // empty) end)
+  jq -r \
+    --arg region "$LIGHTNODE_REGION" \
+    --arg zone "$LIGHTNODE_ZONE" \
+    --arg package_code "$LIGHTNODE_PACKAGE_CODE" \
+    --argjson target_cpu "$LIGHTNODE_DEFAULT_PACKAGE_CPU" \
+    --argjson target_memory "$LIGHTNODE_DEFAULT_PACKAGE_MEMORY_GB" '
+    def region_zone_match:
+      select((.regionCode // "") == $region)
+      | select(($zone == "") or ((.zoneCode // "") == $zone) or ((.zoneCode // "") == ""));
+    def preferred_order:
+      sort_by(
+        if (.publicIpChargeMode // "") == "PayByBandwidth" then 0 else 1 end,
+        (.systemDiskSize // 0),
+        (.dataDiskSize // 0),
+        (.bandwidth // .freeFlow // 999999999),
+        (.packageCode // "")
+      );
+    def default_size:
+      select((.cpu // -1) == $target_cpu and (.memory // -1) == $target_memory);
+
+    if $package_code != "" then
+      ([.packages[]? | region_zone_match | select((.packageCode // "") == $package_code)][0].packageCode // empty)
+    else
+      ([.packages[]? | region_zone_match | default_size] | preferred_order | .[0].packageCode // empty)
+    end
   ' <<<"$body"
 }
 
@@ -217,13 +241,13 @@ wait_async_task() {
       echo "failed to query async task ${task_uuid}: http ${code}" >&2
       return 1
     fi
-    result="$(jq -r '.asyncTaskInfo.processResult // empty' <<<"$body")"
-    status="$(jq -r '.asyncTaskInfo.taskStatus // empty' <<<"$body")"
+    result="$(jq -r '.asyncTaskInfo.processResult // .processResult // empty' <<<"$body")"
+    status="$(jq -r '.asyncTaskInfo.taskStatus // .taskStatus // empty' <<<"$body")"
     if [[ "$result" == "SUCCESS" ]]; then
       return 0
     fi
     if [[ "$result" == "FAIL" || "$result" == "CANCEL" ]]; then
-      jq -r '.asyncTaskInfo.errorMessage // .asyncTaskInfo.failMessage // .asyncTaskInfo.remark // .asyncTaskInfo.message // "lightnode async task failed"' <<<"$body" >&2
+      jq -r '.asyncTaskInfo.errorMessage // .asyncTaskInfo.failMessage // .asyncTaskInfo.remark // .asyncTaskInfo.message // .errorMessage // .failMessage // .remark // .message // "lightnode async task failed"' <<<"$body" >&2
       return 1
     fi
     [[ -n "$status" ]] || true
@@ -335,7 +359,7 @@ create_instance() {
     exit "$EXIT_PROVIDER_FAILURE"
   }
 
-  task_uuid="$(jq -r '.asyncTaskInfo.asyncTaskUUID // empty' <<<"$body")"
+  task_uuid="$(extract_async_task_uuid "$body")"
   ecs_uuid="$(jq -r '.asyncTaskInfo.ecsResourceUUID // empty' <<<"$body")"
   [[ -n "$ecs_uuid" ]] || {
     echo "missing ecsResourceUUID" >&2
@@ -401,8 +425,122 @@ destroy_instance() {
     echo "$body" >&2
     return "$EXIT_PROVIDER_FAILURE"
   }
-  task_uuid="$(jq -r '.asyncTaskInfo.asyncTaskUUID // empty' <<<"$body")"
+  task_uuid="$(extract_async_task_uuid "$body")"
   [[ -z "$task_uuid" ]] || wait_async_task "$task_uuid" 600 10
+}
+
+stop_instance() {
+  require_env LIGHTNODE_TOKEN
+
+  local server_id="" force_stop="true"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --server-id)
+        server_id="$2"
+        shift 2
+        ;;
+      --force-stop)
+        force_stop="$2"
+        shift 2
+        ;;
+      *)
+        echo "unknown arg: $1" >&2
+        return "$EXIT_USAGE"
+        ;;
+    esac
+  done
+
+  [[ -n "$server_id" ]] || {
+    echo "missing --server-id" >&2
+    return "$EXIT_USAGE"
+  }
+
+  local payload resp body code task_uuid
+  if [[ "$force_stop" != "true" && "$force_stop" != "false" ]]; then
+    force_stop="true"
+  fi
+  payload="$(jq -cn --arg id "$server_id" --argjson force "$force_stop" '{ecsResourceUUID:$id,forceStop:$force}')"
+  resp="$(api_request POST "/instance/stop" "$payload")"
+  body="$(parse_body "$resp")"
+  code="$(parse_code "$resp")"
+  is_success_code "$code" || {
+    echo "$body" >&2
+    return "$EXIT_PROVIDER_FAILURE"
+  }
+  task_uuid="$(extract_async_task_uuid "$body")"
+  [[ -z "$task_uuid" ]] || wait_async_task "$task_uuid" 600 10
+}
+
+reinstall_instance() {
+  require_env LIGHTNODE_TOKEN
+  require_env LIGHTNODE_PASSWORD
+
+  local server_id="" image_name="$LIGHTNODE_IMAGE_NAME"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --server-id)
+        server_id="$2"
+        shift 2
+        ;;
+      --image-name)
+        image_name="$2"
+        shift 2
+        ;;
+      *)
+        echo "unknown arg: $1" >&2
+        return "$EXIT_USAGE"
+        ;;
+    esac
+  done
+
+  [[ -n "$server_id" ]] || {
+    echo "missing --server-id" >&2
+    return "$EXIT_USAGE"
+  }
+
+  auto_detect_region
+
+  local image_uuid payload resp body code task_uuid detail_body ipv4
+  image_uuid="$(get_image_uuid "$image_name")"
+  if [[ -z "$image_uuid" && "$image_name" != "ubuntu" ]]; then
+    image_uuid="$(get_image_uuid ubuntu)"
+  fi
+  [[ -n "$image_uuid" ]] || {
+    echo "no suitable lightnode image found" >&2
+    exit "$EXIT_PROVIDER_UNAVAILABLE"
+  }
+
+  stop_instance --server-id "$server_id"
+
+  if [[ -n "${LIGHTNODE_SSH_KEY_UUID:-}" ]]; then
+    payload="$(jq -cn --arg id "$server_id" --arg password "$LIGHTNODE_PASSWORD" --arg image "$image_uuid" --arg region "$LIGHTNODE_REGION" --arg key "$LIGHTNODE_SSH_KEY_UUID" '{ecsResourceUUID:$id,password:$password,imageResourceUUID:$image,regionCode:$region,sshKeyResourceUUID:$key}')"
+  else
+    payload="$(jq -cn --arg id "$server_id" --arg password "$LIGHTNODE_PASSWORD" --arg image "$image_uuid" --arg region "$LIGHTNODE_REGION" '{ecsResourceUUID:$id,password:$password,imageResourceUUID:$image,regionCode:$region,sshKeyResourceUUID:null}')"
+  fi
+
+  resp="$(api_request POST "/instance/reinstallSystem" "$payload")"
+  body="$(parse_body "$resp")"
+  code="$(parse_code "$resp")"
+  is_success_code "$code" || {
+    echo "$body" >&2
+    exit "$EXIT_PROVIDER_FAILURE"
+  }
+
+  task_uuid="$(extract_async_task_uuid "$body")"
+  [[ -z "$task_uuid" ]] || wait_async_task "$task_uuid" 900 15 30
+
+  if ! detail_body="$(wait_instance_detail "$server_id" 300 5 30)"; then
+    exit "$EXIT_PROVIDER_FAILURE"
+  fi
+  ipv4="$(jq -r '.instance.publicIpAddress // empty' <<<"$detail_body")"
+
+  jq -cn \
+    --arg server_id "$server_id" \
+    --arg ipv4 "$ipv4" \
+    --arg region "$LIGHTNODE_REGION" \
+    --arg image "$image_uuid" \
+    --arg image_name "$image_name" \
+    '{server_id:$server_id, ipv4:$ipv4, region:$region, image_uuid:$image, image_name:$image_name, platform:"lightnode", status:"reinstalled"}'
 }
 
 validate_inventory() {
@@ -526,8 +664,16 @@ main() {
       shift
       destroy_instance "$@"
       ;;
+    stop)
+      shift
+      stop_instance "$@"
+      ;;
+    reinstall|rebuild)
+      shift
+      reinstall_instance "$@"
+      ;;
     *)
-      echo "usage: $0 create|validate|cleanup-stale|destroy [args]" >&2
+      echo "usage: $0 create|validate|cleanup-stale|destroy|stop|reinstall [args]" >&2
       exit "$EXIT_USAGE"
       ;;
   esac
