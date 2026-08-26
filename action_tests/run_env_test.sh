@@ -615,13 +615,49 @@ prepare_remote_repo() {
   # shellcheck disable=SC2016
   remote_exec '
 apt-get update -y
-DEBIAN_FRONTEND=noninteractive apt-get install -y curl wget git jq ca-certificates
+DEBIAN_FRONTEND=noninteractive apt-get install -y curl wget git jq ca-certificates iproute2 python3
 cd /root
 rm -rf -- "/root/${VIRTTEST_ENV_NAME}"
 git clone --depth 1 "https://github.com/oneclickvirt/${VIRTTEST_ENV_NAME}.git" "/root/${VIRTTEST_ENV_NAME}"
 cd "/root/${VIRTTEST_ENV_NAME}"
 chmod -R +x . || true
 ' >>"$REMOTE_LOG_FILE" 2>&1
+}
+
+platform_ipv6_regression_command() {
+  case "$ENV_NAME" in
+    docker|podman|containerd)
+      printf '%s\n' 'bash tests/test_ipv6_network.sh'
+      ;;
+    lxd)
+      printf '%s\n' 'bash tests/build_ipv6_network_test.sh && bash tests/test_ipv6_network.sh'
+      ;;
+    incus)
+      printf '%s\n' 'bash tests/build_ipv6_network_test.sh'
+      ;;
+    pve)
+      printf '%s\n' 'bash tests/install_pve_network_test.sh && bash tests/build_nat_network_test.sh && bash tests/default_vm_config_test.sh'
+      ;;
+    qemu)
+      printf '%s\n' 'bash tests/test_ipv6_nat.sh'
+      ;;
+    kubevirt)
+      printf '%s\n' 'bash tests/test_ipv6_address_selection.sh'
+      ;;
+    *)
+      log_error "no IPv6 regression command for environment: ${ENV_NAME}"
+      return 1
+      ;;
+  esac
+}
+
+run_ipv6_regression_suite() {
+  local command
+  command="$(platform_ipv6_regression_command)" || return 1
+  maybe_remote_check 1 "ipv6_regression_suite" "
+cd /root/${ENV_NAME}
+${command}
+"
 }
 
 run_case_docker() {
@@ -944,6 +980,10 @@ main() {
   fi
 
   if ! local_check "prepare_remote_repo" prepare_remote_repo; then
+    exit "$EXIT_TEST_FAILED"
+  fi
+
+  if ! run_ipv6_regression_suite; then
     exit "$EXIT_TEST_FAILED"
   fi
 

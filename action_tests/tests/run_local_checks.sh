@@ -109,6 +109,42 @@ maybe_remote_check 0 "skipped_step" "false" "install failed"
 assert_file_contains "$REPORT_FILE" "| skipped_step | SKIP | 0 | install failed |"
 jq -e 'select(.check == "skipped_step" and .status == "SKIP" and .message == "install failed")' "$RESULTS_FILE" >/dev/null
 
+log "platform IPv6 regression matrix"
+for ipv6_spec in \
+  "docker:bash tests/test_ipv6_network.sh" \
+  "podman:bash tests/test_ipv6_network.sh" \
+  "containerd:bash tests/test_ipv6_network.sh" \
+  "lxd:bash tests/build_ipv6_network_test.sh && bash tests/test_ipv6_network.sh" \
+  "incus:bash tests/build_ipv6_network_test.sh" \
+  "pve:bash tests/install_pve_network_test.sh && bash tests/build_nat_network_test.sh && bash tests/default_vm_config_test.sh" \
+  "qemu:bash tests/test_ipv6_nat.sh" \
+  "kubevirt:bash tests/test_ipv6_address_selection.sh"; do
+  ipv6_env="${ipv6_spec%%:*}"
+  ipv6_expected="${ipv6_spec#*:}"
+  ENV_NAME="$ipv6_env"
+  ipv6_actual="$(platform_ipv6_regression_command)"
+  if [[ "$ipv6_actual" != "$ipv6_expected" ]]; then
+    fail "IPv6 regression command for ${ipv6_env} = '${ipv6_actual}', want '${ipv6_expected}'"
+  fi
+done
+
+captured_ipv6_ready=""
+captured_ipv6_check=""
+captured_ipv6_command=""
+maybe_remote_check() {
+  captured_ipv6_ready="$1"
+  captured_ipv6_check="$2"
+  captured_ipv6_command="$3"
+}
+ENV_NAME="podman"
+run_ipv6_regression_suite
+if [[ "$captured_ipv6_ready" != "1" || "$captured_ipv6_check" != "ipv6_regression_suite" ]]; then
+  fail "IPv6 regression suite did not use the expected remote check"
+fi
+if [[ "$captured_ipv6_command" != *"cd /root/podman"* || "$captured_ipv6_command" != *"bash tests/test_ipv6_network.sh"* ]]; then
+  fail "IPv6 regression suite did not run the Podman IPv6 test from its repository"
+fi
+
 log "remote ssh fallback isolation"
 remote_bin="${TMP_DIR}/remote-bin"
 mkdir -p "$remote_bin"
