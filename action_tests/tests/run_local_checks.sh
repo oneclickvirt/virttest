@@ -7,6 +7,7 @@ TMP_DIR="$(mktemp -d)"
 
 # shellcheck disable=SC2329
 cleanup() {
+  # shellcheck disable=SC2317 # Invoked through the EXIT trap.
   rm -rf "$TMP_DIR"
 }
 trap 'cleanup' EXIT
