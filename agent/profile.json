@@ -1,0 +1,17 @@
+{
+  "repository": "oneclickvirt/virttest",
+  "branch": "main",
+  "skill_name": "oneclickvirt-virttest",
+  "purpose": "Run and maintain the virtualization installation test harness.",
+  "notes": [
+    "Use action_tests/run_env_test.sh for the selected target environment. Read its environment and privilege requirements, use isolated guests and keep fixture evidence distinct from real installation/guest-boot evidence."
+  ],
+  "guide": "https://www.spiritlhl.net/guide/agent_integrations.html",
+  "releases": false,
+  "mcp": false,
+  "source_files": [],
+  "purpose_zh": "运行和维护虚拟化安装脚本的自动化测试环境。",
+  "notes_zh": [
+    "按目标环境使用 action_tests/run_env_test.sh，先阅读权限及环境要求，在隔离客户机测试，并区分模拟数据、真实安装和客户机启动证据。"
+  ]
+}

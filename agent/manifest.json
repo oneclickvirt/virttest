@@ -1,0 +1,10 @@
+{
+  "repository": "oneclickvirt/virttest",
+  "skill_name": "oneclickvirt-virttest",
+  "mcp": false,
+  "files": {
+    "agent/profile.json": "18fde1c90b441357232d822c49819cf85847f89e59ba337b4708e6c20f15697d",
+    "skills/oneclickvirt-virttest/SKILL.md": "76697cbc33c3294563182128a21f2bb15885f6b09c0bb8d526a7d20dc8eee54b",
+    "skills/oneclickvirt-virttest/SKILL_ZH.md": "5398169b259b250c4366a0a1eaf01cb81e791483187ec3cdfced053d546096c8"
+  }
+}
